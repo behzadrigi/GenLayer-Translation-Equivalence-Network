@@ -47,6 +47,9 @@ class TranslatorReputation(gl.Contract):
         except:
             raise gl.vm.UserError("Invalid data from reviewer")
 
+        assert review.get("source_fetched", False), \
+            "Source could not be fetched during review — cannot finalize without real evidence"
+
         translator = review.get("translator", "")
         assert translator != "", "Translator not found in review record"
 
@@ -67,6 +70,8 @@ class TranslatorReputation(gl.Contract):
             except:
                 raise gl.vm.UserError("Invalid data from challenge contract")
             assert challenge.get("status", "") == "FINAL", "Challenge has not been finalized"
+            assert challenge.get("source_fetched", False), \
+                "Source could not be fetched during the challenge — cannot finalize without real evidence"
 
             if challenge.get("verdict", "") == "OVERTURNED":
                 # The original review's finding was wrong; a fixed low penalty
