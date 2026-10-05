@@ -9,11 +9,27 @@ from dataclasses import dataclass
 VERDICTS = ("UPHELD", "OVERTURNED")
 
 
-def ask_verdict(source_content: str, translated_text: str, target_lang: str,
-                 reason: str, review_summary: str) -> str:
+def fetch_source(source_url: str):
+    try:
+        content = gl.nondet.web.render(source_url)
+    except Exception:
+        return None
+    if content is None or str(content).strip() == "":
+        return None
+    return content
+
+
+def judge_challenge(source_url: str, translated_text: str, target_lang: str,
+                     reason: str, review_summary: str) -> dict:
+    content = fetch_source(source_url)
+    if content is None:
+        # Could not see the source — never let an unfetchable page silently
+        # default to UPHELD or OVERTURNED; record that distinctly instead.
+        return {"source_fetched": False, "verdict": "UPHELD"}
+
     prompt = f"""
     Source text (truncated):
-    {source_content[:2500]}
+    {content[:2500]}
 
     Translated text (target language: {target_lang}):
     {translated_text[:2000]}
@@ -27,10 +43,12 @@ def ask_verdict(source_content: str, translated_text: str, target_lang: str,
     Respond with ONLY one word: UPHELD or OVERTURNED.
     """
     response = gl.nondet.exec_prompt(prompt)
+    verdict = "UPHELD"
     for word in re.findall(r"[A-Z]+", str(response).upper()):
         if word in VERDICTS:
-            return word
-    return "UPHELD"
+            verdict = word
+            break
+    return {"source_fetched": True, "verdict": verdict}
 
 
 @allow_storage
@@ -39,6 +57,7 @@ class ChallengeRecord:
     translation_id: u256
     challenger: str
     reason: str
+    source_fetched: bool
     verdict: str
     status: str  # FINAL
 
@@ -90,22 +109,26 @@ class TranslationChallenge(gl.Contract):
         target_lang = translation_data.get("target_lang", "")
         translated_text = translation_data.get("translated_text", "")
 
-        try:
-            content = gl.nondet.web.render(source_url)
-        except:
-            content = ""
-
-        # Equivalence Principle: STRICT EQUALITY on a two-way verdict.
+        # Equivalence Principle: STRICT EQUALITY on a two-way verdict. The
+        # source is fetched FRESH, independently, inside both leader_fn and
+        # validator_fn below — never fetched once outside and shared, which
+        # would make "independent" recomputation meaningless.
         def leader_fn():
-            return {"verdict": ask_verdict(content, translated_text, target_lang, reason, review_summary)}
+            return judge_challenge(source_url, translated_text, target_lang, reason, review_summary)
 
         def validator_fn(leader_result):
             if not isinstance(leader_result, gl.vm.Return):
                 return False
-            leader_verdict = leader_result.calldata.get("verdict")
-            if leader_verdict not in VERDICTS:
+            leader_data = leader_result.calldata
+            if not isinstance(leader_data.get("source_fetched"), bool):
                 return False
-            return ask_verdict(content, translated_text, target_lang, reason, review_summary) == leader_verdict
+            if leader_data.get("verdict") not in VERDICTS:
+                return False
+            mine = judge_challenge(source_url, translated_text, target_lang, reason, review_summary)
+            return (
+                mine["source_fetched"] == leader_data["source_fetched"]
+                and mine["verdict"] == leader_data["verdict"]
+            )
 
         result = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
 
@@ -113,6 +136,7 @@ class TranslationChallenge(gl.Contract):
             translation_id=translation_id,
             challenger=challenger,
             reason=reason,
+            source_fetched=result["source_fetched"],
             verdict=result["verdict"],
             status="FINAL",
         )
@@ -127,6 +151,7 @@ class TranslationChallenge(gl.Contract):
             "translation_id": int(c.translation_id),
             "challenger": c.challenger,
             "reason": c.reason,
+            "source_fetched": c.source_fetched,
             "verdict": c.verdict,
             "status": c.status,
         })
