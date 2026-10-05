@@ -1,7 +1,6 @@
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 
 import json
-import re
 
 from genlayer import *
 from dataclasses import dataclass
@@ -19,21 +18,34 @@ def ask_yes_no(source_content: str, translated_text: str, target_lang: str, ques
     Respond with ONLY: YES or NO
     """
     response = gl.nondet.exec_prompt(prompt)
-    for word in re.findall(r"[A-Z]+", str(response).upper()):
-        if word in ("YES", "NO"):
-            return word == "YES"
+    for word in response.upper().split():
+        clean = "".join(ch for ch in word if ch.isalpha())
+        if clean in ("YES", "NO"):
+            return clean == "YES"
     return False
 
 
 def review_translation(source_url: str, translated_text: str, target_lang: str) -> dict:
     try:
         content = gl.nondet.web.render(source_url)
-    except:
-        content = ""
-    if content.strip() == "":
-        return {"semantic_equivalence": False, "no_omissions": False, "no_additions": False}
+    except Exception:
+        content = None
+
+    if content is None or str(content).strip() == "":
+        # Distinguish "could not see the source" from "saw it and it's a bad
+        # translation" — these must never be collapsed into the same false
+        # result, or a translator gets penalized for an infrastructure
+        # failure rather than their own work. Same pattern already used in
+        # MarketOracleSettlement for an unfetchable market source.
+        return {
+            "source_fetched": False,
+            "semantic_equivalence": False,
+            "no_omissions": False,
+            "no_additions": False,
+        }
 
     return {
+        "source_fetched": True,
         "semantic_equivalence": ask_yes_no(
             content, translated_text, target_lang,
             "Does the translated text convey the same meaning as the source text?",
@@ -54,6 +66,7 @@ def review_translation(source_url: str, translated_text: str, target_lang: str) 
 class ReviewRecord:
     translation_id: u256
     translator: str
+    source_fetched: bool
     semantic_equivalence: bool
     no_omissions: bool
     no_additions: bool
@@ -87,9 +100,10 @@ class EquivalenceReviewer(gl.Contract):
         translated_text = data.get("translated_text", "")
         assert translator != "", "Translator not found in translation record"
 
-        # Equivalence Principle: COMPARATIVE, multi-field. The contract fetches
-        # the actual source page itself; the translation is judged against the
-        # real source, not against the translator's own description of it.
+        # Equivalence Principle: COMPARATIVE, multi-field. The contract
+        # fetches the actual source page itself; the translation is judged
+        # against the real source, not against the translator's own
+        # description of it.
         def leader_fn():
             return review_translation(source_url, translated_text, target_lang)
 
@@ -97,12 +111,13 @@ class EquivalenceReviewer(gl.Contract):
             if not isinstance(leader_result, gl.vm.Return):
                 return False
             leader_data = leader_result.calldata
-            for field in ("semantic_equivalence", "no_omissions", "no_additions"):
+            for field in ("source_fetched", "semantic_equivalence", "no_omissions", "no_additions"):
                 if not isinstance(leader_data.get(field), bool):
                     return False
             mine = review_translation(source_url, translated_text, target_lang)
             return (
-                mine["semantic_equivalence"] == leader_data["semantic_equivalence"]
+                mine["source_fetched"] == leader_data["source_fetched"]
+                and mine["semantic_equivalence"] == leader_data["semantic_equivalence"]
                 and mine["no_omissions"] == leader_data["no_omissions"]
                 and mine["no_additions"] == leader_data["no_additions"]
             )
@@ -112,6 +127,7 @@ class EquivalenceReviewer(gl.Contract):
         self.reviews[translation_id] = ReviewRecord(
             translation_id=translation_id,
             translator=translator,
+            source_fetched=result["source_fetched"],
             semantic_equivalence=result["semantic_equivalence"],
             no_omissions=result["no_omissions"],
             no_additions=result["no_additions"],
@@ -127,6 +143,7 @@ class EquivalenceReviewer(gl.Contract):
         return json.dumps({
             "translation_id": int(r.translation_id),
             "translator": r.translator,
+            "source_fetched": r.source_fetched,
             "semantic_equivalence": r.semantic_equivalence,
             "no_omissions": r.no_omissions,
             "no_additions": r.no_additions,
