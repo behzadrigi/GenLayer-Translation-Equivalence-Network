@@ -14,8 +14,7 @@ def clean_url(url: str):
     if cleaned.startswith('http://'):
         cleaned = cleaned.replace('http://', 'https://', 1)
     cleaned = cleaned.replace(' ', '')
-    if '?' in cleaned:
-        cleaned = cleaned.split('?')[0]
+    # Query strings are preserved so distinct resources stay distinct.
     return cleaned if cleaned else None
 
 
@@ -53,6 +52,7 @@ class TranslationRegistry(gl.Contract):
         assert is_valid_url(cleaned), f"Invalid source URL: {cleaned}"
         assert target_lang.strip() != "", "Target language cannot be empty"
         assert translated_text.strip() != "", "Translated text cannot be empty"
+        assert len(translated_text) <= 2000, "Translated text too long (max 2000 characters)"
 
         tid = self.next_id
         self.next_id += u256(1)
